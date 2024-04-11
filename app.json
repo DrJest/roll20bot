@@ -1,0 +1,7 @@
+{
+  "name"              : "roll20bot",
+  "script"            : "./app.js",
+  "exec_mode"         : "cluster",
+  "instances"         : "1",
+  "max_memory_restart": "300M"
+}
