@@ -167,28 +167,6 @@ bot.onText(/^\/location(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
   return bot.sendMessage(msg.chat.id, loc);
 });
 
-bot.onText(/^\/caciocavallo(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
-  let random = await roll(100);
-  let url = `https://www.googleapis.com/customsearch/v1?key=AIzaSyAvkRod2bYthkXMTLsvwYxxqQDLmketXmo&q=caciocavallo&num=1&start=${random.value}&cx=015836063795977646110:cnw6pvt-vpi&searchType=image`;
-  let body = await fetch(url);
-  body = await body.json();
-  let img = body.items[0];
-  let photo = await fetch(img.image.thumbnailLink);
-  photo = await photo.buffer();
-  let opts = {
-    reply_to_message_id: msg.message_id,
-    parse_mode: "Markdown",
-    chatId: msg.chat.id,
-    uid: msg.from.id,
-    isGroup: msg.chat.id != msg.from.id,
-    sender: msg.from.username || msg.from.first_name
-  };
-  const photoOpts = {
-    filename: "photo",
-  };
-  return bot.sendPhoto(opts.chatId, photo, opts, );
-});
-
 bot.onText(/^\/santodelgiorno(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
   let body = await fetch(
     `http://www.santodelgiorno.it/_scriptjs/santodelgiorno.php`
