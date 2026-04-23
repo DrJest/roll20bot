@@ -1,0 +1,67 @@
+name: Docker Build and Deploy
+on:
+  push:
+    branches: [ "staging" ]
+permissions:
+  packages: write
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ github.ref_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Lowercase repo name for deploy
+        id: prep_repo
+        run: echo "repo_lower=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Generate short commit SHA
+        id: prep_sha
+        run: echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ steps.prep_repo.outputs.repo_lower }}:${{ github.ref_name }}
+            ghcr.io/${{ steps.prep_repo.outputs.repo_lower }}:${{ steps.prep_sha.outputs.short_sha }}
+          build-args: |
+            CURRENT_ENV=${{ github.ref_name }}
+            GIT_BRANCH=${{ github.ref_name }}
+            GIT_COMMIT=${{ github.sha }}
+            GIT_COMMIT_SHORT=${{ steps.prep_sha.outputs.short_sha }}
+    outputs:
+      repo_lower: ${{ steps.prep_repo.outputs.repo_lower }}
+      short_sha: ${{ steps.prep_sha.outputs.short_sha }}
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: 
+      name: ${{ github.ref_name }}
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          envs: GITHUB_TOKEN
+          script: |
+            cd ${{ secrets.DEPLOY_PATH }}
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            IMAGE="ghcr.io/${{ needs.build.outputs.repo_lower }}:${{ needs.build.outputs.short_sha }}"
+            yq -y -i ".services.${{ vars.SERVICE_NAME }}.image = \"$IMAGE\"" docker-compose.yml
+            docker compose pull ${{ vars.SERVICE_NAME }}
+            docker compose up -d --remove-orphans
