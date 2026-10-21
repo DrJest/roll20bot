@@ -1,92 +1,78 @@
-const randomNumber = require("random-number-csprng");
-const moment = require("moment");
 const emoji = require("node-emoji");
-const fetch = require("node-fetch");
-process.env.NTBA_FIX_319 = 1;
-const TelegramBot = require("node-telegram-bot-api");
+const { Bot, InputFile, run, startWebhook } = require("node-telegram-bot-api/node");
+const dotenv = require("dotenv");
+const { dice, roll } = require("./dice");
+const { MAX_COUNT, MIN_FACES, MAX_FACES, parseRoll, parseSanto } = require("./parsers");
+
+dotenv.config({ quiet: true });
 
 const token = process.env.TELEGRAM_TOKEN;
-
-const options = {};
-
-if(!process.env.TELEGRAM_WEBHOOK_URL) {
-  options.polling = true;
-}
-else {
-  options.webhook = {
-    port: process.env.TELEGRAM_WEBHOOK_PORT,
-    key: process.env.TELEGRAM_WEBHOOK_KEY,
-    cert: process.env.TELEGRAM_WEBHOOK_CERT
-  };
+if (!token) {
+  console.error("TELEGRAM_TOKEN is not set in the environment variables.");
+  process.exit(1);
 }
 
-const bot = new TelegramBot(token, options);
+const bot = new Bot(token);
 
-async function dice(max, min) {
-  if (typeof min === "undefined") min = 1;
-  return {
-    type: `D${max}`,
-    value: await randomNumber(min, max)
-  };
-}
+const FACES = [2, 4, 6, 8, 10, 12, 20, 100];
 
-async function roll(max) {
-  if (max === 100) {
-    let d10 = await dice(10, 0),
-      d100 = await dice(9, 0),
-      value;
-    if (d100.value === 0 && d10.value === 0) value = 100;
-    else value = d10.value + d100.value * 10;
-    return {
-      type: "D100",
-      value
-    };
-  }
-  return dice(max);
-}
+// Ogni risposta cita il messaggio con il comando, anche se nel frattempo è stato cancellato.
+const replyParams = ctx => ({
+  reply_parameters: { message_id: ctx.message.message_id, allow_sending_without_reply: true }
+});
 
-if(options.webhook) {
-  bot.setWebHook(`${process.env.TELEGRAM_WEBHOOK_URL}/bot${token}`);
-}
+bot.hears(/^\/help(\@[_A-Za-z0-9]+)?$/, async (ctx) => {
+  await ctx.reply([
+    "Comandi disponibili:",
+    `${FACES.map(f => `/roll${f}`).join(" ")} – tira un dado con quel numero di facce`,
+    `/roll <espressione> – somma dadi e numeri separati da +, es. /roll 2d6+1d4+3 (da 1 a ${MAX_COUNT} dadi, da d${MIN_FACES} a d${MAX_FACES})`,
+    "/venti – modificatori dei Venti della Magia",
+    "/location – locazione del colpo",
+    "/santodelgiorno – foto e nome del santo del giorno",
+    "/help – questo messaggio"
+  ].join("\n"), replyParams(ctx));
+});
 
-bot.onText(/^\/roll(\d+)(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
-  const faces = parseInt(match[1]);
-  if ([2, 4, 6, 8, 10, 12, 20, 100].indexOf(faces) > -1) {
+bot.hears(/^\/roll(\d+)(\@[_A-Za-z0-9]+)?$/, async (ctx) => {
+  const faces = parseInt(ctx.match[1]);
+  if (FACES.indexOf(faces) > -1) {
     let dice = await roll(faces);
     let rndm = dice.value;
-    await bot.sendMessage(
-      msg.chat.id,
-      `Hai tirato un D${faces}, il tuo risultato è ${rndm}`
-    );
+    await ctx.reply(`Hai tirato un D${faces}, il tuo risultato è ${rndm}`, replyParams(ctx));
   }
 });
 
-bot.onText(/^\/roll (.*)$/, async (msg, match) => {
-  const expr = match[1].replace(/\s/g, '');
+bot.hears(/^\/roll(\@[_A-Za-z0-9]+)? (.*)$/, async (ctx) => {
+  const expr = ctx.match[2].replace(/\s/g, '');
   if(!expr) return;
-  const parts = expr.split('+');
+  const terms = parseRoll(expr);
+  const invalid = terms.filter(t => t.type === "invalid").map(t => t.text);
+  if(!terms.length || invalid.length) {
+    const which = invalid.length ? `: ${invalid.join(", ")}` : "";
+    return ctx.reply(
+      `Espressione non valida${which}\n` +
+      `Usa dadi NdM (da 1 a ${MAX_COUNT} dadi, da d${MIN_FACES} a d${MAX_FACES}) e numeri, separati da +. Es. /roll 2d6+3`,
+      replyParams(ctx)
+    );
+  }
   let total = 0, values = [];
-  for( let p of parts ) {
-    if(/^\d+[d]\d+$/.test(p)) {
-      let a = p.split('d');
-      for(let q = 0; q < parseInt(a[0]); ++q) {
-        let v = (await roll(a[1])).value;
+  for( let term of terms ) {
+    if(term.type === "dice") {
+      for(let q = 0; q < term.count; ++q) {
+        let v = (await dice(term.faces)).value;
         total += v;
         values.push(v);
       }
     }
-    if(/^\d+$/.test(p)) {
-      total += parseInt(p);
-      values.push(p);
+    if(term.type === "number") {
+      total += term.value;
+      values.push(term.value);
     }
   }
-  await bot.sendMessage(
-    msg.chat.id,
-    `${expr}: [${values.join('+')}] = ${total}`
-  );
+  await ctx.reply(`${expr}: [${values.join('+')}] = ${total}`, replyParams(ctx));
 });
 
-bot.onText(/^\/venti(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
+bot.hears(/^\/venti(\@[_A-Za-z0-9]+)?$/, async (ctx) => {
   async function getMod(color) {
     let d10 = (await roll(10)).value;
     let mod = -30;
@@ -146,13 +132,15 @@ bot.onText(/^\/venti(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
 
   const message = await Promise.all(promises);
 
-  await bot.sendMessage(
-    msg.chat.id,
-    moment().format("DD/MM/YYYY HH:mm:ss") + "\n" + message.join("\n")
-  );
+  const now = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  const date = `${pad(now.getDate())}/${pad(now.getMonth() + 1)}/${now.getFullYear()}`;
+  const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+
+  await ctx.reply(`${date} ${time}` + "\n" + message.join("\n"), replyParams(ctx));
 });
 
-bot.onText(/^\/location(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
+bot.hears(/^\/location(\@[_A-Za-z0-9]+)?$/, async (ctx) => {
   let d = (await roll(100)).value;
   if( d < 10 ) d = '0' + d;
   if( d == 100 ) d = '00';
@@ -164,36 +152,48 @@ bot.onText(/^\/location(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
   if(d>44) loc = "Torso";
   if(d>79) loc = "Gamba Sinistra";
   if(d>89) loc = "Gamba Destra";
-  return bot.sendMessage(msg.chat.id, loc);
+  return ctx.reply(loc, replyParams(ctx));
 });
 
-bot.onText(/^\/santodelgiorno(\@[_A-Za-z0-9]+)?$/, async (msg, match) => {
+bot.hears(/^\/santodelgiorno(\@[_A-Za-z0-9]+)?$/, async (ctx) => {
+  const msg = ctx.message;
   let body = await fetch(
-    `http://www.santodelgiorno.it/_scriptjs/santodelgiorno.php`
+    `https://www.santodelgiorno.it/_scriptjs/santodelgiorno.php`
   );
-  body = await body.text();
+  const santo = parseSanto(await body.text());
 
-  let opts = {
-    reply_to_message_id: msg.message_id,
+  let photo = await fetch(santo.img);
+  photo = new Uint8Array(await photo.arrayBuffer());
+  return bot.api.sendPhoto({
+    chat_id: msg.chat.id,
+    photo: new InputFile(photo, { filename: "photo.jpg", contentType: "image/jpeg" }),
+    caption: santo.caption,
     parse_mode: "Markdown",
-    chatId: msg.chat.id,
-    uid: msg.from.id,
-    isGroup: msg.chat.id != msg.from.id,
-    sender: msg.from.username || msg.from.first_name
-	};
+    ...replyParams(ctx)
+  });
+});
 
-  body = body.substr(0, body.indexOf(`document.getElementById`));
-  body = `(function(){${body}; \n return { nome: nomeSanto, img: immagine.replace('small','big')}; })()`;
-  var santo = eval(body);
-  opts.caption = santo.nome
-    .replace(/<br\s*[\/]?>/gi, "\n")
-    .replace(/(<([^>]+)>)/gi, "");
-  const photoOpts = {
-    filename: "photo",
-    contentType: "image/jpeg"
-  };
+async function start() {
+  if(!process.env.TELEGRAM_WEBHOOK_URL) {
+    return run(bot);
+  }
+  // Il path contenente il token resta l'autenticazione di default;
+  // TELEGRAM_WEBHOOK_SECRET (opzionale) aggiunge il controllo dell'header secret_token.
+  const secret = process.env.TELEGRAM_WEBHOOK_SECRET || undefined;
+  const path = `/bot${token}`;
+  await bot.api.setWebhook({
+    url: `${process.env.TELEGRAM_WEBHOOK_URL}${path}`,
+    secret_token: secret
+  });
+  return startWebhook(bot, {
+    port: Number(process.env.TELEGRAM_WEBHOOK_PORT),
+    path,
+    secretToken: secret,
+    allowUnauthenticated: !secret
+  });
+}
 
-	let photo = await fetch(santo.img);
-	photo = await photo.buffer();
-  return bot.sendPhoto(opts.chatId, photo, opts, photoOpts);
+start().catch(err => {
+  console.error(err);
+  process.exit(1);
 });
